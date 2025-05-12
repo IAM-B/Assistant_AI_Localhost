@@ -1,0 +1,6 @@
+venv-ia/
+__pycache__/
+*.wav
+*.log
+*.tmp
+performance_log.txt

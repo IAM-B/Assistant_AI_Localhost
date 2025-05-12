@@ -1,0 +1,11 @@
+whisper
+faster-whisper
+sounddevice
+scipy
+numpy
+torch
+transformers
+requests
+langdetect
+TTS
+pynput
