@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import time
@@ -7,26 +8,28 @@ import termios
 import atexit
 import threading
 import sounddevice as sd
+from langdetect import detect
 import numpy as np
 import tempfile
 import subprocess
 import requests
 import json
+import scipy.io.wavfile as wavfile
 from faster_whisper import WhisperModel
 from TTS.api import TTS
 from pynput import keyboard
-import scipy.io.wavfile as wavfile
 from datetime import datetime
-import re
 
 # Configuration
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL_NAME = "mistral"
-TTS_MODEL = "tts_models/fr/css10/vits"
-WHISPER_MODEL = "medium"  # modèle plus léger pour tester la rapidité
+TTS_MODEL = "tts_models/multilingual/multi-dataset/your_tts"
+WHISPER_MODEL = "turbo"
 SAMPLING_RATE = 16000
 AUDIO_FILE = "response.wav"
 LOG_FILE = "performance_log.txt"
+tts_process = None
+interrupt_tts = False
 
 # Initialisation des métriques
 boot_time = time.time()
@@ -38,6 +41,7 @@ stt_load_time = time.time() - stt_start
 
 tts_start = time.time()
 tts_model = TTS(model_name=TTS_MODEL, gpu=torch.cuda.is_available())
+available_speakers = [s.strip() for s in tts_model.speakers]
 tts_load_time = time.time() - tts_start
 
 # Variables
@@ -78,6 +82,9 @@ def transcriber():
         start = time.time()
         temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         wavfile.write(temp.name, SAMPLING_RATE, (audio * 32767).astype(np.int16))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         segments, _ = stt_model.transcribe(temp.name, language="fr")
         text = " ".join([segment.text for segment in segments])
         print("[📝]", text)
@@ -86,10 +93,10 @@ def transcriber():
 
 # LLM + TTS (streaming optimisé)
 def ollama_asker():
-    buffer = ""
     sentence_end = re.compile(r"[.!?]\s")
     while True:
         prompt = queue_response.get()
+        buffer = ""
         print("[🤖] Envoi au LLM...")
         start = time.time()
         try:
@@ -107,10 +114,10 @@ def ollama_asker():
                             chunk = data["response"]
                             print(chunk, end="", flush=True)
                             buffer += chunk
-                            # Si on atteint une fin de phrase
-                            if sentence_end.search(buffer):
-                                speak(buffer.strip())
-                                buffer = ""
+                            sentences = sentence_end.split(buffer)
+                            for s in sentences[:-1]:
+                                speak(s.strip())
+                            buffer = sentences[-1]
                         except Exception as e:
                             print("[⚠️] Erreur de chunk:", e)
                             continue
@@ -126,26 +133,89 @@ def ollama_asker():
             log("LLM_ERROR", 0)
 
 # TTS
+def detect_lang(text):
+    code = detect(text)
+    if code == "fr":
+        return "fr-fr"
+    elif code == "en":
+        return "en"
+    elif code == "pt":
+        return "pt-br"
+    else:
+        return "en"
+
+def get_speaker(lang):
+    print(f"[🔍] Speakers disponibles : {available_speakers}")
+    mapping = {
+        "fr-fr": "female-en-5",
+        "en": "male-en-2",
+        "pt-br": "male-pt-3"
+    }
+    speaker = mapping.get(lang, "male-en-2")
+    if speaker not in available_speakers:
+        print(f"[⚠] Speaker '{speaker}' indisponible. Speakers dispos : {available_speakers}")
+        return available_speakers[0]
+    return speaker
+
+def clean_text_for_tts(text):
+    text = re.sub(r"[-•:*]", "", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
 def speak(text):
+    global tts_process, interrupt_tts
+    if interrupt_tts:
+        print("[🛑] TTS annulé avant génération.")
+        return
     try:
-        tts_model.tts_to_file(text=text, file_path=AUDIO_FILE)
-        subprocess.run(["aplay", AUDIO_FILE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        lang = detect_lang(text)
+        speaker = get_speaker(lang)
+        print(f"[🔊] Langue détectée : {lang} | Speaker : {speaker}")
+        text = clean_text_for_tts(text)
+        tts_model.tts_to_file(
+            text=text,
+            language=lang,
+            speaker=speaker,
+            file_path="response.wav"
+        )
+        if interrupt_tts:
+            print("[🛑] TTS annulé après génération.")
+            return
+        tts_process = subprocess.Popen(["aplay", "response.wav"])
+        while True:
+            if interrupt_tts:
+                print("[🛑] TTS interrompu pendant lecture.")
+                if tts_process and tts_process.poll() is None:
+                    tts_process.terminate()
+                tts_process = None
+                return
+            if tts_process and tts_process.poll() is not None:
+                break
+            time.sleep(0.05)
+        tts_process = None
     except Exception as e:
         print(f"[❌] Erreur TTS : {e}")
 
 # Clavier
 def on_press(key):
-    global recording, audio_buffer
-    if key == keyboard.Key.f12 and not recording:
-        print("[🎙️] Enregistrement démarré (F12)")
-        recording = True
-        audio_buffer = []
+    global recording, audio_buffer, tts_process, interrupt_tts
+    if key == keyboard.Key.f12:
+        if tts_process and tts_process.poll() is None:
+            print("[🛑] TTS interrompu par F12.")
+            tts_process.terminate()
+            interrupt_tts = True
+            tts_process = None
+        if not recording:
+            print("[🎙️] Enregistrement démarré (F12)")
+            recording = True
+            audio_buffer = []
 
 def on_release(key):
-    global recording
+    global recording, interrupt_tts
     if key == keyboard.Key.f12 and recording:
         print("[🛑] Enregistrement arrêté")
         recording = False
+        interrupt_tts = False
         if audio_buffer:
             audio = np.concatenate(audio_buffer, axis=0)
             queue_transcription.put(audio)
