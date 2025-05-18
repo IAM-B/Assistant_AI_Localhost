@@ -159,6 +159,7 @@ def get_speaker(lang):
 
 def clean_text_for_tts(text):
     text = re.sub(r"[-•:*]", "", text)
+    text = re.sub(r"[!?:]", ".", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 

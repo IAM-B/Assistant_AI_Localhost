@@ -4,3 +4,5 @@ __pycache__/
 *.log
 *.tmp
 performance_log.txt
+AI_Project.pdf
+.vscode
