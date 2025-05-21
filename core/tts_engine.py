@@ -10,7 +10,7 @@ available_speakers = [s.strip() for s in tts_model.speakers]
 def get_speaker(lang):
     print(f"[🔍] Speakers disponibles : {available_speakers}")
     mapping = {
-        "fr-fr": "female-en-5",
+        "fr-fr": "male-en-2",
         "en": "male-en-2",
         "pt-br": "male-pt-3"
     }
